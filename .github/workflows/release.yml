@@ -113,6 +113,13 @@ jobs:
       - name: Drop dev dependencies
         run: npm prune --omit=dev --no-save
 
+      # npm installed only this runner's (Linux) native binaries. The zip runs
+      # on every platform the manifest declares, so add theirs — the exact
+      # tarballs package-lock.json pins, checked against its integrity hashes.
+      # Into node_modules only, so the tree stays clean for the pack step.
+      - name: Add every platform's native binaries
+        run: npm run native:all
+
       # Packs, boots the packed folder the way the installer's probe does, and
       # refuses anything the Lab would reject. On a tag it also insists the
       # manifest version matches the tag.

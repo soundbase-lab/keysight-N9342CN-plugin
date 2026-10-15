@@ -16,6 +16,7 @@
     "smoke": "node scripts/smoke.mjs",
     "rename": "node scripts/rename.mjs",
     "bump": "node scripts/bump-version.mjs",
+    "native:all": "node scripts/fetch-native-binaries.mjs",
     "pack:release": "node scripts/pack-release.mjs"
   },
   "dependencies": {
