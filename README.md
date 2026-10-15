@@ -1,3 +1,6 @@
+# Warning! Not tested with any hardware!
+
+
 # Keysight N9342CN for SoundBase
 
 Connects a Keysight (formerly Agilent) **N9342CN** handheld spectrum analyzer
