@@ -1,7 +1,7 @@
 {
-  "name": "soundbase-plugin-template",
+  "name": "soundbase-plugin-keysight-n9342cn",
   "version": "0.1.12",
-  "description": "Starting point for a SoundBase plugin: a synthetic spectrum analyzer served by the plugin shell.",
+  "description": "SoundBase plugin: Keysight N9342CN.",
   "license": "BUSL-1.1",
   "type": "module",
   "main": "main.js",
@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "@soundbase/plugin-contract": "^0.12.2",
-    "@soundbase/plugin-shell": "^0.12.2"
+    "@soundbase/plugin-shell": "^0.12.2",
+    "usb": "3.1.0"
   },
   "soundbase": {
     "template": {

@@ -1,155 +1,63 @@
 {
   "manifestVersion": 1,
-  "id": "template",
-  "name": "SoundBase Plugin Template",
+  "id": "keysight-n9342cn",
+  "name": "Keysight N9342CN",
   "version": "0.1.12",
   "license": "BUSL-1.1",
   "platforms": ["darwin-arm64", "darwin-x64", "win32-x64"],
   "repository": "https://github.com/your-org/soundbase-plugin-template",
-  "maintainers": [{ "name": "Your Name", "email": "you@example.com" }],
+  "maintainers": [
+    {
+      "name": "Your Name",
+      "email": "you@example.com"
+    }
+  ],
   "contract": {
     "core": "1.4",
     "modules": {
-      "SpectrumAnalyzer": "1.2",
-      "ChannelMonitoring": "1.1",
-      "PropertyControl": "1.0"
+      "SpectrumAnalyzer": "1.2"
     }
   },
-  "runtime": { "type": "node", "entrypoint": "main.js" },
+  "runtime": {
+    "type": "node",
+    "entrypoint": "main.js"
+  },
   "deployment": ["managed"],
-  "template": { "name": "soundbase-plugin-template", "version": "1.0.15" },
+  "template": {
+    "name": "soundbase-plugin-template",
+    "version": "1.0.15"
+  },
   "products": [
     {
-      "deviceTypeId": "plugin:template/synthetic",
+      "deviceTypeId": "plugin:keysight-n9342cn/n9342cn",
       "manufacturer": {
-        "id": "soundbase",
-        "name": "SoundBase",
-        "logo": {
-          "light": "logos/soundbase-light.svg",
-          "dark": "logos/soundbase-dark.svg"
-        }
+        "id": "keysight",
+        "name": "Keysight"
       },
       "model": {
-        "id": "synthetic",
-        "name": "Synthetic",
-        "displayName": "Synthetic Analyzer"
+        "id": "n9342cn",
+        "name": "N9342CN",
+        "displayName": "Keysight N9342CN"
       },
-      "family": { "id": "template", "name": "Template" },
-      "capabilities": { "spectrumAnalyzer": true },
-      "traits": { "isSpectrumAnalyzer": true }
-    },
-    {
-      "deviceTypeId": "plugin:template/synthetic-iem",
-      "manufacturer": {
-        "id": "soundbase",
-        "name": "SoundBase",
-        "logo": {
-          "light": "logos/soundbase-light.svg",
-          "dark": "logos/soundbase-dark.svg"
-        }
+      "family": {
+        "id": "keysight-hsa",
+        "name": "Keysight Handheld Spectrum Analyzer"
       },
-      "model": {
-        "id": "synthetic-iem",
-        "name": "Synthetic IEM",
-        "displayName": "Synthetic Stereo IEM"
-      },
-      "family": { "id": "template", "name": "Template" },
       "capabilities": {
-        "meters": true,
-        "frequency": true,
-        "name": true,
-        "mute": true,
-        "receivers": true
+        "spectrumAnalyzer": true
       },
       "traits": {
-        "isTransmitter": true,
-        "isIem": true,
-        "isRackDevice": true,
-        "channelCount": 2
-      },
-      "channelName": {
-        "maxLength": 8,
-        "uppercase": true,
-        "allowsSpaces": true,
-        "allowedChars": "^[A-Z0-9 _-]*$"
-      },
-      "layout": {
-        "channel": [
-          {
-            "type": "group",
-            "direction": "row",
-            "children": [
-              {
-                "type": "meter",
-                "bind": "meters.af",
-                "metric": "AUDIO_LEVEL",
-                "label": "L"
-              },
-              {
-                "type": "meter",
-                "bind": "meters.afR",
-                "metric": "AUDIO_LEVEL_RIGHT",
-                "label": "R"
-              }
-            ]
-          },
-          {
-            "type": "value",
-            "bind": "frequency",
-            "format": "frequency",
-            "unit": "MHz"
-          },
-          {
-            "type": "value",
-            "bind": "txPower",
-            "format": "integer",
-            "unit": "mW",
-            "label": "TX"
-          },
-          {
-            "type": "indicator",
-            "bind": "mute",
-            "label": "Mute",
-            "tone": "warning"
-          },
-          {
-            "type": "indicator",
-            "bind": "rfState",
-            "label": "RF",
-            "tone": "success"
-          },
-          { "type": "control", "propertyId": "txPower" }
-        ],
-        "device": [
-          { "type": "text", "text": "Synthetic stereo IEM transmitter" }
-        ],
-        "entities": {
-          "receiver": [
-            { "type": "value", "bind": "name" },
-            { "type": "battery", "bind": "battery" },
-            { "type": "meter", "bind": "meters.rf1", "metric": "RF_LEVEL" },
-            { "type": "meter", "bind": "meters.lqi", "metric": "QUALITY" }
-          ]
-        }
+        "isSpectrumAnalyzer": true
       }
     }
   ],
-  "pluginConfigFields": [
+  "deviceConfigFields": [
     {
-      "id": "sweepIntervalMs",
-      "type": "number",
-      "label": "Simulated sweep interval (ms)",
-      "default": 50
+      "id": "serial",
+      "type": "textinput",
+      "label": "Serial number",
+      "help": "The analyzer's serial number, as shown under **System > Show System**. Leave empty to use the first N9342CN connected over USB."
     }
   ],
-  "stateKeys": [
-    "meters",
-    "frequency",
-    "channelName",
-    "mute",
-    "txPower",
-    "rfState",
-    "receivers",
-    { "key": "x.template.packLink", "scope": "channel", "op": "merge" }
-  ]
+  "stateKeys": []
 }
