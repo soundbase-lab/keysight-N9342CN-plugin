@@ -1,388 +1,375 @@
-// Synthetic adapters — one per module — for the two products the manifest
-// declares. Replace this file (and, for anything with a wire protocol, a
-// driver/ beside it) to build a real plugin: main.js, the manifest shape and
-// the shell stay exactly as they are. A plugin that only does one of the two
-// things below simply does not export the other factory.
+// Keysight N9342CN handheld spectrum analyzer, over USB.
+//
+//   adapter.js                 the SoundBase contract — this file
+//   driver/n9342c.js           the analyzer's SCPI
+//   driver/worker-link.js      the plugin's end of the USB worker
+//   driver/worker/             the child process that owns the USB device
+//   driver/usbtmc.js           USBTMC framing, the protocol under VISA's USB0::
+//   driver/fake-n9342c.js      a fake analyzer, so tests need no hardware
+//   driver/protocol.md         every command used, and where it is documented
+//
+// The analyzer is a USBTMC device, so no vendor driver is involved: the `usb`
+// package claims its interface directly, inside a worker process the plugin
+// can kill if a USB call ever wedges.
 
-import { HttpError } from '@soundbase/plugin-shell';
+import {
+  N9342C,
+  listAnalyzers,
+  MAX_ATTEN_DB,
+  MAX_REF_LEVEL_DBM,
+  MIN_REF_LEVEL_DBM,
+  RBW_HZ,
+} from './driver/n9342c.js';
 
-// The products these adapters announce their devices as. Each MUST be one of
-// the `deviceTypeId`s declared in soundbase-plugin.json — the shell warns and
-// the host ignores a device naming a product the manifest never declared.
-// `npm run rename` keeps them in step; a test asserts they agree.
-export const PRODUCT = 'plugin:template/synthetic';
-export const IEM_PRODUCT = 'plugin:template/synthetic-iem';
+// The product this adapter announces its devices as. It MUST be a
+// `deviceTypeId` declared in soundbase-plugin.json — the host ignores a device
+// naming a product the manifest never declared. `npm run rename` keeps them in
+// step; a test asserts they agree.
+export const PRODUCT = 'plugin:keysight-n9342cn/n9342cn';
 
-// ---------------------------------------------------------------------------
-// SpectrumAnalyzer: a synthetic spectrum
-// ---------------------------------------------------------------------------
-
-const MIN_FREQUENCY_HZ = 100_000;
-const MAX_FREQUENCY_HZ = 6_000_000_000;
-const RBW_HZ = [1_000, 3_000, 10_000, 30_000, 100_000, 300_000, 1_000_000];
 const DEFAULT_START_HZ = 470_000_000;
 const DEFAULT_STOP_HZ = 616_000_000;
-const DEFAULT_POINT_DIVISOR = 450;
-const MAX_POINTS = 2000;
-const SWEEP_INTERVAL_MS = 50;
+// USB transfer and parsing time on top of the analyzer's own sweep time
+const SWEEP_OVERHEAD_MS = 150;
 
-const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-const round1 = (v) => Math.round(v * 10) / 10;
+const ATTENUATION_STEPS_DB = Array.from(
+  { length: MAX_ATTEN_DB / 5 + 1 },
+  (_, i) => i * 5
+);
+
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
-// a gaussian "signal" bump, height in dB above the noise floor
-const bump = (f, center, width, height) =>
-  height * Math.exp(-(((f - center) / width) ** 2));
-
-const nearestRbw = (hz) =>
-  RBW_HZ.reduce((best, candidate) =>
-    Math.abs(candidate - hz) < Math.abs(best - hz) ? candidate : best
-  );
-
-class SyntheticAnalyzerAdapter {
-  constructor(device, pluginConfig = {}) {
-    this.device = device;
-    this.sweepIntervalMs = isNum(pluginConfig.sweepIntervalMs)
-      ? pluginConfig.sweepIntervalMs
-      : SWEEP_INTERVAL_MS;
-    this.config = {
-      startHz: DEFAULT_START_HZ,
-      stopHz: DEFAULT_STOP_HZ,
-      pointCount: DEFAULT_POINT_DIVISOR + 1,
-      rbwHz: undefined,
-    };
-    this.sweepCount = 0;
-    this.timer = null;
-    this.onFatal = null;
-  }
-
-  async open() {
-    return {
-      capabilities: {
-        minFrequencyHz: MIN_FREQUENCY_HZ,
-        maxFrequencyHz: MAX_FREQUENCY_HZ,
-        rbwHz: [...RBW_HZ],
-      },
-      identity: { model: 'Synthetic', firmware: '0.1.0' },
-    };
-  }
-
-  async applyConfig(cfg = {}) {
-    const startHz = clamp(
-      isNum(cfg.startHz) ? cfg.startHz : this.config.startHz,
-      MIN_FREQUENCY_HZ,
-      MAX_FREQUENCY_HZ
-    );
-    const stopHz = clamp(
-      isNum(cfg.stopHz) ? cfg.stopHz : this.config.stopHz,
-      startHz + 1,
-      MAX_FREQUENCY_HZ
-    );
-    const span = Math.max(1, stopHz - startHz);
-    let pointCount;
-    if (isNum(cfg.pointCount)) {
-      pointCount = Math.round(cfg.pointCount);
-    } else {
-      const step =
-        isNum(cfg.stepHz) && cfg.stepHz > 0
-          ? cfg.stepHz
-          : span / DEFAULT_POINT_DIVISOR;
-      pointCount = Math.round(span / step) + 1;
-    }
-    this.config = {
-      startHz,
-      stopHz,
-      pointCount: clamp(pointCount, 2, MAX_POINTS),
-      rbwHz: isNum(cfg.rbwHz) ? nearestRbw(cfg.rbwHz) : undefined,
-    };
-    return { ...this.config };
-  }
-
-  async startSweep(onTrace) {
-    if (this.timer) return;
-    this.timer = setInterval(
-      () => onTrace(this.buildTrace()),
-      this.sweepIntervalMs
-    );
-    this.timer.unref?.();
-  }
-
-  async stopSweep() {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = null;
-  }
-
-  async close() {
-    await this.stopSweep();
-  }
-
-  buildTrace() {
-    const { startHz, stopHz, pointCount } = this.config;
-    const span = Math.max(1, stopHz - startHz);
-    const amps = new Array(pointCount);
-    const peakA = startHz + span * 0.33;
-    const peakB = startHz + span * 0.66;
-    const transient = startHz + span * 0.5;
-    this.sweepCount += 1;
-    // a transient on roughly one sweep in seven — this is why max-hold has to
-    // accumulate every sweep, not just the ones a client happens to poll
-    const withTransient = this.sweepCount % 7 === 0;
-    for (let i = 0; i < pointCount; i += 1) {
-      const f = startHz + (i * (stopHz - startHz)) / (pointCount - 1);
-      let amp = -100 + (Math.random() * 4 - 2);
-      amp += bump(f, peakA, span * 0.01, 45);
-      amp += bump(f, peakB, span * 0.006, 30);
-      if (withTransient) amp += bump(f, transient, span * 0.003, 50);
-      amps[i] = round1(amp);
-    }
-    return amps;
-  }
-}
-
-export function createSpectrumAnalyzerAdapter(device, pluginConfig) {
-  return new SyntheticAnalyzerAdapter(device, pluginConfig);
-}
-
-// ---------------------------------------------------------------------------
-// ChannelMonitoring + PropertyControl: a synthetic stereo IEM transmitter
-// ---------------------------------------------------------------------------
-//
-// Two stereo channels, each with a bodypack receiver paired to it. Audio
-// meters move on a slow sine so the bars visibly breathe; the packs drain
-// their batteries and wobble their RF. Every property the layout shows is
-// writable through `setProperty`, and the new value comes back as state —
-// which is the whole PropertyControl idea: the device is the truth.
-
-const IEM_CHANNEL_COUNT = 2;
-const IEM_MIN_MHZ = 470;
-const IEM_MAX_MHZ = 608;
-const IEM_STEP_MHZ = 0.025;
-const IEM_NAME_MAX = 8; // mirrors the manifest's channelName.maxLength
-const TX_POWER_MW = [10, 50, 100];
-// The shell coalesces `meters` to one patch per 50 ms tick, so reporting any
-// faster than that is wasted work; a real device reports at whatever rate it
-// has and lets the shell do the coalescing.
-const METER_INTERVAL_MS = 50;
-const PACK_INTERVAL_MS = 1_000;
-
-const quantize = (v, step) => Math.round(v / step) * step;
-const round3 = (v) => Math.round(v * 1000) / 1000;
-const nearestTxPower = (mw) =>
-  TX_POWER_MW.reduce((best, candidate) =>
-    Math.abs(candidate - mw) < Math.abs(best - mw) ? candidate : best
-  );
-
-class SyntheticIemAdapter {
-  constructor(device) {
-    this.device = device;
-    this.channels = {
-      1: {
-        channelName: 'VOX L',
-        frequency: 518.1,
-        txPower: 50,
-        mute: false,
-        rfState: true,
-      },
-      2: {
-        channelName: 'VOX R',
-        frequency: 542.35,
-        txPower: 50,
-        mute: false,
-        rfState: true,
-      },
-    };
-    this.packs = {
-      'pack:1': {
-        id: 'pack:1',
-        name: 'Pack 1',
-        channel: 1,
-        battery: { percent: 92, lifetimeInMinutes: 410 },
-        meters: { rf1: -55, lqi: 96 },
-      },
-      'pack:2': {
-        id: 'pack:2',
-        name: 'Pack 2',
-        channel: 2,
-        battery: { percent: 61, lifetimeInMinutes: 230 },
-        meters: { rf1: -63, lqi: 88 },
-      },
-    };
-    this.phase = 0;
-    this.meterTimer = null;
-    this.packTimer = null;
-    // assigned by the shell before open()
-    this.onState = null;
-    this.onWarnings = null;
-    this.onFatal = null;
-  }
-
-  async open() {
-    // the complete state first, so SoundBase renders a full card at once
-    for (const key of [
-      'channelName',
-      'frequency',
-      'txPower',
-      'mute',
-      'rfState',
-    ])
-      this.emitChannelKey(key);
-    this.onState?.('receivers', {
-      added: Object.values(this.packs).map((pack) => ({ ...pack })),
-      updated: [],
-      removed: [],
-    });
-    // an extension key: which pack each channel feeds, something SoundBase
-    // has no core key for. Declared in the manifest's stateKeys.
-    this.onState?.('x.template.packLink', {
-      channels: { 1: 'pack:1', 2: 'pack:2' },
-    });
-    this.meterTimer = setInterval(() => this.tickMeters(), METER_INTERVAL_MS);
-    this.meterTimer.unref?.();
-    this.packTimer = setInterval(() => this.tickPacks(), PACK_INTERVAL_MS);
-    this.packTimer.unref?.();
-    return {
-      channelCount: IEM_CHANNEL_COUNT,
-      properties: this.properties(),
-      identity: { model: 'Synthetic IEM', firmware: '0.1.0' },
-    };
-  }
-
-  async close() {
-    clearInterval(this.meterTimer);
-    clearInterval(this.packTimer);
-    this.meterTimer = null;
-    this.packTimer = null;
-  }
-
-  /** PropertyControl descriptors, in SoundBase's PropertyDescriptor shape. */
-  properties() {
-    const channel = (id, value) => ({
-      id,
-      scope: 'channel',
-      access: 'readWrite',
-      stateBinding: { key: id },
-      value,
-    });
-    return [
-      channel('txPower', { type: 'enum', options: TX_POWER_MW, unit: 'mW' }),
-      channel('mute', { type: 'boolean' }),
-      channel('frequency', {
-        type: 'number',
-        min: IEM_MIN_MHZ,
-        max: IEM_MAX_MHZ,
-        step: IEM_STEP_MHZ,
-        unit: 'MHz',
-      }),
-      channel('channelName', { type: 'string', maxLength: IEM_NAME_MAX }),
-    ];
-  }
-
-  /** `{ requestId, propertyId, channelIndex?, entityId?, value }` → applied, then reported. */
-  async setProperty({ propertyId, channelIndex, value }) {
-    const ch = this.channels[channelIndex];
-    if (!ch) {
-      throw new HttpError(
-        400,
-        'unknown_channel',
-        `${propertyId} is per channel; channelIndex must be 1..${IEM_CHANNEL_COUNT}`
-      );
-    }
-    switch (propertyId) {
-      case 'txPower':
-        if (!isNum(value)) throw badValue(propertyId, 'a number in mW');
-        ch.txPower = nearestTxPower(value);
-        break;
-      case 'mute':
-        ch.mute = Boolean(value);
-        break;
-      case 'frequency':
-        if (!isNum(value)) throw badValue(propertyId, 'a number in MHz');
-        // clamp and quantize, then echo: the card shows what the device did
-        ch.frequency = round3(
-          quantize(clamp(value, IEM_MIN_MHZ, IEM_MAX_MHZ), IEM_STEP_MHZ)
-        );
-        break;
-      case 'channelName':
-        if (typeof value !== 'string') throw badValue(propertyId, 'a string');
-        ch.channelName = value.trim().toUpperCase().slice(0, IEM_NAME_MAX);
-        break;
-      default:
-        throw new HttpError(
-          400,
-          'unknown_property',
-          `No property ${propertyId} on ${IEM_PRODUCT}`
-        );
-    }
-    this.emitChannelKey(propertyId, channelIndex);
-  }
-
-  emitChannelKey(key, only) {
-    const channels = {};
-    for (const [n, ch] of Object.entries(this.channels)) {
-      if (only === undefined || Number(n) === only) channels[n] = ch[key];
-    }
-    this.onState?.(key, { channels });
-  }
-
-  tickMeters() {
-    this.phase += 0.12;
-    const channels = {};
-    for (const [n, ch] of Object.entries(this.channels)) {
-      const swing = 14 * Math.sin(this.phase + Number(n));
-      const af = ch.mute ? -90 : round1(-24 + swing);
-      channels[n] = { af, afR: round1(af - 2.5), txOn: ch.rfState };
-    }
-    this.onState?.('meters', { timestamp: Date.now(), channels });
-  }
-
-  tickPacks() {
-    const updated = [];
-    for (const pack of Object.values(this.packs)) {
-      pack.battery.percent = Math.max(0, pack.battery.percent - 1);
-      pack.battery.lifetimeInMinutes = Math.max(
-        0,
-        pack.battery.lifetimeInMinutes - 4
-      );
-      pack.meters.rf1 = round1(pack.meters.rf1 + (Math.random() * 4 - 2));
-      pack.meters.lqi = clamp(
-        Math.round(pack.meters.lqi + (Math.random() * 6 - 3)),
-        0,
-        100
-      );
-      updated.push({
-        id: pack.id,
-        changes: { battery: { ...pack.battery }, meters: { ...pack.meters } },
-      });
-    }
-    this.onState?.('receivers', { added: [], updated, removed: [] });
-  }
-}
-
-const badValue = (propertyId, expected) =>
-  new HttpError(400, 'bad_value', `${propertyId} expects ${expected}`);
-
-export function createMonitoringAdapter(device, pluginConfig) {
-  return new SyntheticIemAdapter(device, pluginConfig);
-}
 
 // ---------------------------------------------------------------------------
 // discovery
 // ---------------------------------------------------------------------------
 
-// one fixed device per product, so the discovery path is exercised end to end
+let reportedDiscoveryFailure = false;
+
+/**
+ * Analyzers on USB right now, found by vendor and product id (0x0957:0x2118)
+ * without opening them. The id comes from the USB serial number, which is the
+ * analyzer's own serial, so it is stable across restarts and across machines.
+ */
 export async function discoverDevices() {
-  return [
-    {
-      id: 'synthetic:1',
-      name: 'Synthetic Analyzer',
-      product: PRODUCT,
-      transport: { kind: 'synthetic' },
+  let analyzers;
+  try {
+    analyzers = await listAnalyzers();
+  } catch (err) {
+    // once, not once a second: discovery is polled
+    if (!reportedDiscoveryFailure) {
+      reportedDiscoveryFailure = true;
+      console.error(`[keysight-n9342cn] USB discovery failed: ${err.message}`);
+    }
+    return [];
+  }
+  reportedDiscoveryFailure = false;
+  return analyzers.map((analyzer) => ({
+    id: analyzer.serial
+      ? `usb:${analyzer.serial}`
+      : `usb:bus${analyzer.bus}-${analyzer.address}`,
+    name: analyzer.serial
+      ? `Keysight N9342CN (${analyzer.serial})`
+      : 'Keysight N9342CN',
+    product: PRODUCT,
+    transport: {
+      kind: 'usb',
+      serial: analyzer.serial,
+      vendorId: hex(analyzer.vendorId),
+      productId: hex(analyzer.productId),
     },
-    {
-      id: 'synthetic-iem:1',
-      name: 'Synthetic IEM',
-      product: IEM_PRODUCT,
-      transport: { kind: 'synthetic' },
-    },
-  ];
+  }));
+}
+
+const hex = (n) => `0x${n.toString(16).padStart(4, '0')}`;
+
+// ---------------------------------------------------------------------------
+// SpectrumAnalyzer
+// ---------------------------------------------------------------------------
+
+export function createSpectrumAnalyzerAdapter(device) {
+  return new N9342cnAdapter(device);
+}
+
+class N9342cnAdapter {
+  constructor(device) {
+    // Addressing arrives in the device the host asked for: the serial number
+    // from its configuration, or the one encoded in a discovered device's id.
+    // No serial at all means "the first N9342CN on USB".
+    this.serial = serialOf(device);
+    this.analyzer = null;
+    this.pointCount = null;
+    this.effective = null;
+    this.sweeping = false;
+    this.warnings = new Map();
+    // assigned by the shell
+    this.onFatal = null;
+    this.onWarnings = null;
+  }
+
+  async open() {
+    const analyzer = new N9342C({ serial: this.serial });
+    analyzer.onFatal = (err) => this.#fatal(err);
+    let identity;
+    try {
+      identity = await analyzer.connect();
+      // a known starting point for everything SoundBase lets the user change:
+      // automatic bandwidths, automatic attenuation, no preamp, peak detector
+      await analyzer.setRbw(null);
+      await analyzer.setVbw(null);
+      this.controls = {
+        detector: await analyzer.setDetector('positive'),
+        attenuation: attenuationValue(await analyzer.setAttenuation(null)),
+        preamp: await analyzer.setPreamp(false),
+      };
+      // The analyzer sweeps a fixed number of points that no command changes
+      // (461, by every account, but the guide never says). Learn it from the
+      // trace it is displaying, rather than trusting a constant.
+      this.pointCount = (await analyzer.readTrace()).length;
+      await this.#reportInstrumentErrors(analyzer);
+    } catch (err) {
+      await analyzer.close();
+      throw new Error(
+        `Keysight N9342CN${this.serial ? ` ${this.serial}` : ''}: ${err.message}`
+      );
+    }
+    this.analyzer = analyzer;
+    this.effective = null;
+
+    return {
+      capabilities: {
+        minFrequencyHz: analyzer.range.minHz,
+        maxFrequencyHz: analyzer.range.maxHz,
+        rbwHz: [...RBW_HZ],
+        minRefLevelDbm: MIN_REF_LEVEL_DBM,
+        maxRefLevelDbm: MAX_REF_LEVEL_DBM,
+        // no command sets the point count, so SoundBase offers no control for
+        // it; every echo reports the count the analyzer sweeps
+        autoPointCount: true,
+        controls: [
+          {
+            id: 'detector',
+            type: 'dropdown',
+            label: 'Detector',
+            default: 'positive',
+            choices: [
+              { id: 'positive', label: 'Peak' },
+              { id: 'sample', label: 'Sample' },
+              { id: 'average', label: 'Average' },
+              { id: 'negative', label: 'Negative peak' },
+              { id: 'normal', label: 'Normal' },
+            ],
+            help: 'Peak catches every carrier in a bin and is the right choice for coordination.',
+          },
+          {
+            id: 'attenuation',
+            type: 'dropdown',
+            label: 'Input attenuation',
+            default: 'auto',
+            choices: [
+              { id: 'auto', label: 'Auto' },
+              ...ATTENUATION_STEPS_DB.map((db) => ({
+                id: String(db),
+                label: `${db} dB`,
+              })),
+            ],
+            help: 'Raise this if strong nearby transmitters are overloading the front end.',
+          },
+          {
+            id: 'preamp',
+            type: 'checkbox',
+            label: 'Preamplifier',
+            default: false,
+            help: 'Lowers the noise floor to find weak signals. Turn it off near strong transmitters.',
+          },
+        ],
+      },
+      identity: {
+        manufacturer: identity.manufacturer,
+        model: identity.model,
+        firmware: identity.firmware,
+      },
+    };
+  }
+
+  /**
+   * Apply what was asked for and return what the analyzer settled on. Every
+   * value is set, then read back: the echo is the analyzer's word, not ours.
+   *
+   * The shell hands over the whole desired configuration each time, with
+   * controls already merged by id, so an absent bandwidth is not "unchanged"
+   * but "the analyzer's choice" — the user cleared it, or never set it.
+   */
+  async applyConfig(cfg = {}) {
+    const analyzer = this.#require();
+    const previous = this.effective ?? { controls: { ...this.controls } };
+    const resolved = {};
+
+    const range = await analyzer.setRange(
+      isNum(cfg.startHz) ? cfg.startHz : (previous.startHz ?? DEFAULT_START_HZ),
+      isNum(cfg.stopHz) ? cfg.stopHz : (previous.stopHz ?? DEFAULT_STOP_HZ)
+    );
+
+    const effective = {
+      startHz: range.startHz,
+      stopHz: range.stopHz,
+      // requested pointCount and stepHz are ignored: the analyzer's is fixed
+      pointCount: this.pointCount,
+      controls: { ...previous.controls },
+    };
+
+    // Bandwidths: a number is manual; anything else is automatic, and an
+    // automatic value moves with the span, so it is read back every time and
+    // reported under `resolved`.
+    if (isNum(cfg.rbwHz)) effective.rbwHz = await analyzer.setRbw(cfg.rbwHz);
+    else resolved.rbwHz = await analyzer.setRbw(null);
+
+    if (isNum(cfg.vbwHz)) effective.vbwHz = await analyzer.setVbw(cfg.vbwHz);
+    else resolved.vbwHz = await analyzer.setVbw(null);
+
+    // reference level only scales the analyzer's own display; set it if asked
+    if (isNum(cfg.refLevelDbm)) {
+      effective.refLevelDbm = await analyzer.setRefLevel(cfg.refLevelDbm);
+    }
+
+    const controls = cfg.controls ?? {};
+    if ('detector' in controls) {
+      effective.controls.detector = await analyzer.setDetector(
+        controls.detector ?? 'positive'
+      );
+    }
+    if ('attenuation' in controls) {
+      effective.controls.attenuation = attenuationValue(
+        await analyzer.setAttenuation(attenuationRequest(controls.attenuation))
+      );
+    }
+    if ('preamp' in controls) {
+      effective.controls.preamp = await analyzer.setPreamp(
+        Boolean(controls.preamp)
+      );
+    }
+
+    resolved.sweepTimeMs = Math.ceil(
+      (await analyzer.sweepTimeMs()) + SWEEP_OVERHEAD_MS
+    );
+    effective.resolved = resolved;
+
+    await this.#reportInstrumentErrors(analyzer);
+    this.effective = effective;
+    return effective;
+  }
+
+  /**
+   * One trigger, one complete sweep, one onTrace — in a loop rather than on a
+   * timer, so a slow sweep never overlaps the next.
+   */
+  async startSweep(onTrace) {
+    if (this.sweeping) return;
+    const analyzer = this.#require();
+    this.sweeping = true;
+    (async () => {
+      while (this.sweeping && this.analyzer === analyzer) {
+        let amplitudes;
+        try {
+          amplitudes = await analyzer.sweep();
+        } catch (err) {
+          if (this.sweeping && this.analyzer === analyzer) this.#fatal(err);
+          return;
+        }
+        if (!this.sweeping) return;
+        // Never hand the shell a trace whose length disagrees with the
+        // effective config: it would draw shifted in frequency.
+        if (amplitudes.length !== this.pointCount) {
+          this.#warn('point-count', {
+            severity: 'critical',
+            message:
+              `The analyzer returned ${amplitudes.length} points where ${this.pointCount} ` +
+              'were expected, so its traces are being dropped. Remove and re-add the device.',
+          });
+          continue;
+        }
+        this.#warn('point-count', null);
+        onTrace(amplitudes);
+      }
+    })();
+  }
+
+  async stopSweep() {
+    this.sweeping = false;
+  }
+
+  /** Release the analyzer. Idempotent; never throws. */
+  async close() {
+    this.sweeping = false;
+    const analyzer = this.analyzer;
+    this.analyzer = null;
+    await analyzer?.close().catch(() => {});
+  }
+
+  #require() {
+    if (!this.analyzer) throw new Error('the analyzer is not open');
+    return this.analyzer;
+  }
+
+  #fatal(err) {
+    if (!this.analyzer) return; // a close we asked for
+    this.sweeping = false;
+    this.onFatal?.(err);
+  }
+
+  /**
+   * Anything the analyzer refused goes to the user as an info warning, verbatim.
+   * The command set is from the programmer's guide, not from a unit on a
+   * bench, so this is how a firmware that disagrees with the guide shows up.
+   */
+  async #reportInstrumentErrors(analyzer) {
+    let errors;
+    try {
+      errors = await analyzer.drainErrors();
+    } catch {
+      return;
+    }
+    this.#warn(
+      'instrument-errors',
+      errors.length
+        ? {
+            severity: 'info',
+            message: `The analyzer reported: ${errors.join('; ')}`,
+          }
+        : null
+    );
+  }
+
+  #warn(id, warning) {
+    if (warning) this.warnings.set(id, { id, ...warning });
+    else this.warnings.delete(id);
+    this.onWarnings?.([...this.warnings.values()]);
+  }
+}
+
+/** The serial from device.config, else from a `usb:<serial>` id, else null. */
+function serialOf(device) {
+  const configured = device.config?.serial;
+  if (typeof configured === 'string' && configured.trim()) {
+    return configured.trim();
+  }
+  const match = /^usb:(.+)$/.exec(device.id ?? '');
+  if (match && !/^bus/.test(match[1])) return match[1];
+  return null;
+}
+
+/** 'auto' | '20' | 20 | null -> null (automatic) or a number of dB */
+function attenuationRequest(value) {
+  if (value === null || value === undefined || value === 'auto') return null;
+  const db = Number(value);
+  return Number.isFinite(db) ? db : null;
+}
+
+/** { auto, db } from the analyzer -> the control's value */
+function attenuationValue({ auto, db }) {
+  if (auto) return 'auto';
+  // the dropdown offers 5 dB steps; report the nearest one the menu has
+  const step = ATTENUATION_STEPS_DB.reduce((best, c) =>
+    Math.abs(c - db) < Math.abs(best - db) ? c : best
+  );
+  return String(step);
 }

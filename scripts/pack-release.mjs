@@ -9,11 +9,13 @@
 // dependencies are the ones already installed here, so run an install first
 // and prune the dev ones:
 //
-//   npm ci && npm prune --omit=dev
+//   npm ci && npm prune --omit=dev && npm run native:all
 //
-// That works because both SDK packages are on public npm. `.github/workflows/
+// That works because both SDK packages are on public npm. `native:all` adds
+// the native binaries for the platforms npm skipped on this machine, so the
+// zip runs on every platform the manifest declares. `.github/workflows/
 // release.yml` does exactly this on a tag push; nothing stops you running the
-// same three commands by hand.
+// same commands by hand.
 //
 // It packs, boots the packed result the way the installer's probe does, and
 // checks it against the Lab's rules before you find out from a rejection:

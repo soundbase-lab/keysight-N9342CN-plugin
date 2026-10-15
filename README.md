@@ -1,4 +1,60 @@
-![SoundBase Plugin Template — the Lab's signal-flask mark, the SoundBase wordmark, and one real sweep from this plugin's synthetic spectrum](.github/banner.svg)
+# Keysight N9342CN for SoundBase
+
+Connects a Keysight (formerly Agilent) **N9342CN** handheld spectrum analyzer
+to SoundBase over **USB**. Its sweeps become SoundBase's live spectrum trace.
+
+- Found automatically when plugged in. The device id is the analyzer's serial
+  number (`usb:MY12345678`), so a saved project finds the same analyzer on any
+  machine.
+- Start/stop frequency, RBW, VBW and reference level come from SoundBase's
+  sweep settings. Detector, input attenuation and preamp appear as device
+  controls.
+- No VISA or Keysight IO Libraries needed. The analyzer is a standard USBTMC
+  device, and the plugin talks to it directly through the
+  [`usb`](https://www.npmjs.com/package/usb) package. That runs in a worker
+  process the plugin can kill if a USB call hangs.
+
+**Status: written from Keysight's documentation; not yet tested on a real
+unit.** [driver/protocol.md](driver/protocol.md) lists every command it sends,
+where each is documented, what the documentation leaves open, and a one-shot
+script that answers those questions on a real analyzer.
+
+### Connecting
+
+- **macOS:** plug in the USB cable (the analyzer's *device* port, not the
+  USB-stick host port). Nothing else to install.
+- **Windows:** the plugin needs the analyzer bound to Microsoft's generic
+  WinUSB driver. If Keysight IO Libraries or NI-VISA already owns it, the
+  device shows as failed with a message saying so. Either use
+  [Zadig](https://zadig.akeo.ie/) to switch the analyzer to WinUSB, or close
+  the vendor software. This is untested.
+- Only one program can hold the analyzer at a time. Close Keysight Connection
+  Expert, or any VISA tool that has it open.
+
+### Layout
+
+```
+adapter.js                  the SoundBase contract
+driver/n9342c.js            the analyzer's SCPI
+driver/worker-link.js       the plugin's end of the USB worker
+driver/worker/              the child process that owns the USB device
+driver/usbtmc.js            USBTMC framing (what VISA's USB0::…::INSTR speaks)
+driver/fake-n9342c.js       a fake analyzer at the USB level, for tests
+driver/protocol.md          the command set and its sources
+```
+
+`npm test` runs everything against fake analyzers through the real worker
+process, with nothing plugged in. That includes one that gets unplugged
+mid-sweep and one whose USB read hangs. To run the smoke check through the
+sweep path without hardware:
+
+```sh
+SOUNDBASE_N9342C_FAKE='[{"serial":"MY12345678"}]' npm run smoke
+```
+
+---
+
+*Everything below is the template's guide this plugin was generated from.*
 
 # SoundBase Plugin Template
 
